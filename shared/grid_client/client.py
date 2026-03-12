@@ -12,6 +12,7 @@ import os
 import json
 import logging
 import asyncio
+import time
 from pathlib import Path
 from typing import Any, Optional
 from functools import lru_cache
@@ -33,6 +34,45 @@ else:
     load_dotenv(override=True)  # Try default locations
 
 logger = logging.getLogger(__name__)
+
+from . import fallback  # noqa: E402
+
+# Set GRID_FALLBACK=false to disable the sample-data fallback.
+_FALLBACK_ENABLED = os.getenv("GRID_FALLBACK", "true").lower() != "false"
+# Default: always serve built-in sample data and never call GRID.
+# Set GRID_MODE=live to try the real GRID API first (falls back on auth errors).
+_SAMPLE_ONLY = os.getenv("GRID_MODE", "sample").lower() != "live"
+# After an auth failure, skip live calls for this long before retrying GRID.
+_FALLBACK_RETRY_SECONDS = 600
+_fallback_until: float = 0.0
+_AUTH_MARKERS = ("unauthenticated", "unauthorized", "401", "403", "forbidden", "invalid api key")
+
+
+def _is_auth_error(msg: str) -> bool:
+    low = msg.lower()
+    return any(m in low for m in _AUTH_MARKERS)
+
+
+def _activate_fallback(reason: str) -> None:
+    global _fallback_until
+    if time.time() >= _fallback_until:
+        logger.warning(
+            "GRID rejected credentials (%s). Serving SAMPLE data for %ss.",
+            reason[:120], _FALLBACK_RETRY_SECONDS,
+        )
+    _fallback_until = time.time() + _FALLBACK_RETRY_SECONDS
+
+
+def fallback_active() -> bool:
+    """True while the app is serving sample data instead of live GRID data."""
+    return _FALLBACK_ENABLED and time.time() < _fallback_until
+
+
+def data_source() -> str:
+    """'sample' if serving fallback data, else 'live' (or 'unconfigured')."""
+    if _SAMPLE_ONLY or (not os.getenv("GRID_API_KEY") and _FALLBACK_ENABLED):
+        return "sample"
+    return "sample" if fallback_active() else "live"
 
 
 class GridClientError(Exception):
@@ -185,6 +225,10 @@ class GridClient:
         if cache_key and cache_key in self._cache:
             return self._cache[cache_key]
 
+        # Sample-data fallback: no key configured, or GRID recently rejected it.
+        if _SAMPLE_ONLY or fallback_active() or not self.api_key:
+            return fallback.respond(query, variables)
+
         target_url = self.SERIES_STATE_URL if use_series_state else self.base_url
 
         # Use semaphore to limit concurrent requests to GRID API
@@ -219,6 +263,11 @@ class GridClient:
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"GRID API error: {error_msg}")
+
+                # Revoked/expired key -> serve sample data instead of failing.
+                if _FALLBACK_ENABLED and _is_auth_error(error_msg):
+                    _activate_fallback(error_msg)
+                    return fallback.respond(query, variables)
 
                 # Provide helpful error message for schema mismatches
                 if "Cannot query field" in error_msg:

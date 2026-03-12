@@ -79,4 +79,5 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    from shared.grid_client.client import data_source
+    return {"status": "healthy", "data_source": data_source()}

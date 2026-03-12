@@ -170,6 +170,8 @@ class LoLTeamQueries:
         """
         # Build filter
         filter_obj = {}
+        # Default to this game's title so searches never mix games
+        title_id = title_id or LOL_TITLE_ID
         if title_id:
             filter_obj["titleId"] = title_id
         if name_contains:

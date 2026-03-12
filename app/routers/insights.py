@@ -6,8 +6,8 @@ from typing import Optional
 
 
 from shared.grid_client import GridClient
-from shared.grid_client.lol import LoLMatchQueries
-from shared.grid_client.valorant import ValorantMatchQueries, ValorantTeamQueries
+from shared.grid_client.lol import LoLMatchQueries, LoLPlayerQueries
+from shared.grid_client.valorant import ValorantMatchQueries, ValorantTeamQueries, ValorantPlayerQueries
 
 from app.models.schemas import (
     GameType,
@@ -44,6 +44,19 @@ grid_client = GridClient()
 
 router = APIRouter()
 pattern_detector = PatternDetector()
+
+
+async def _player_name(player_id: str, game: GameType) -> str:
+    """Resolve a player's nickname from GRID; fall back to 'Player <id>'."""
+    try:
+        queries_cls = LoLPlayerQueries if game == GameType.LOL else ValorantPlayerQueries
+        info = await queries_cls(grid_client).get_player_info(str(player_id))
+        nickname = (info.get("player") or {}).get("nickname")
+        if nickname:
+            return nickname
+    except Exception:
+        pass
+    return f"Player {player_id}"
 
 
 @router.post("/player", response_model=PlayerInsightResponse)
@@ -797,7 +810,7 @@ async def compare_players(request: PlayerComparisonRequest) -> PlayerComparisonR
             if not performances:
                 players.append(PlayerComparisonStats(
                     player_id=player_id,
-                    player_name=f"Player {player_id}",
+                    player_name=await _player_name(player_id, request.game),
                 ))
                 continue
 
@@ -934,7 +947,7 @@ async def compare_players(request: PlayerComparisonRequest) -> PlayerComparisonR
 
             players.append(PlayerComparisonStats(
                 player_id=player_id,
-                player_name=f"Player {player_id}",
+                player_name=await _player_name(player_id, request.game),
                 games_played=games_played,
                 wins=wins,
                 win_rate=round(win_rate, 3),
@@ -970,13 +983,14 @@ async def compare_players(request: PlayerComparisonRequest) -> PlayerComparisonR
 
         # Generate comparison highlights
         highlights = []
+        name_by_id = {p.player_id: p.player_name for p in players}
         if all_kdas:
             best_kda = max(all_kdas, key=lambda x: x[1])
-            highlights.append(f"Highest KDA: Player {best_kda[0]} ({best_kda[1]:.2f})")
+            highlights.append(f"Highest KDA: {name_by_id.get(best_kda[0], best_kda[0])} ({best_kda[1]:.2f})")
 
         if all_win_rates:
             best_wr = max(all_win_rates, key=lambda x: x[1])
-            highlights.append(f"Highest Win Rate: Player {best_wr[0]} ({best_wr[1]*100:.1f}%)")
+            highlights.append(f"Highest Win Rate: {name_by_id.get(best_wr[0], best_wr[0])} ({best_wr[1]*100:.1f}%)")
 
         # Determine best performer (highest KDA)
         best_performer = best_kda[0] if all_kdas else None
@@ -1354,7 +1368,7 @@ async def get_player_trends(
         if not performances:
             return TrendResponse(
                 player_id=player_id,
-                player_name=f"Player {player_id}",
+                player_name=await _player_name(player_id, game),
                 game=game,
                 period=f"Last {limit} games",
                 generated_at=datetime.utcnow(),
@@ -1404,7 +1418,7 @@ async def get_player_trends(
 
         return TrendResponse(
             player_id=player_id,
-            player_name=f"Player {player_id}",
+            player_name=await _player_name(player_id, game),
             game=game,
             period=f"Last {len(data_points)} games",
             data_points=data_points,
